@@ -1,0 +1,59 @@
+index import { createInterface } from "readline/promises";
+import { stdin as input, stdout as output } from "process";
+import { createMemecoin } from "./createToken.js";
+import { createLiquidityPool } from "./createPool.js";
+import { owner, CLUSTER, log } from "./config.js";
+
+async function main() {
+  const rl = createInterface({ input, output });
+
+  console.log("===========================================");
+  console.log("   🚀 MEMECOIN LAUNCHER — Solana");
+  console.log(`   Cluster: ${CLUSTER}`);
+  console.log(`   Wallet:  ${owner.publicKey.toBase58()}`);
+  console.log("===========================================");
+
+  const name = await rl.question("Nombre del token: ");
+  const symbol = await rl.question("Símbolo (ej. PEPE): ");
+  const description = await rl.question("Descripción: ");
+  const imagePath = await rl.question("Ruta de la imagen (ej. ./logo.png): ");
+  const supply = Number(await rl.question("Suministro total (ej. 1000000000): "));
+  const decimals = Number((await rl.question("Decimales [9]: ")) || 9);
+  const revoke = (await rl.question("¿Revocar autoridades de mint/freeze? [S/n]: ")).toLowerCase() !== "n";
+
+  log("PASO 1/4 — Creando el token...");
+  const { mint } = await createMemecoin({
+    name, symbol, description, imagePath,
+    supply, decimals, revokeAuthorities: revoke,
+  });
+
+  if (CLUSTER === "mainnet-beta") {
+    const answer = await rl.question(
+      "\n⚠️ Estás en MAINNET. ¿Continuar con la liquidez? Escribe 'SI' para confirmar: "
+    );
+    if (answer !== "SI") {
+      log("Saltando liquidez. Token creado — puedes añadir liquidez cuando quieras.");
+      rl.close();
+      return;
+    }
+  }
+
+  const solAmount = Number(await rl.question("¿Cuántos SOL aportar de liquidez?: "));
+  const tokenAmount = Number(await rl.question("¿Cuántos tokens aportar al pool?: "));
+  const burnLp = (await rl.question("¿Quemar los LP tokens y bloquear la liquidez para siempre? [S/n]: ")).toLowerCase() !== "n";
+
+  log("PASO 2/4 — Creando pool de liquidez en Raydium...");
+  log("PASO 3/4 — Bloqueando liquidez (quema de LP)...");
+  await createLiquidityPool({ tokenMint: mint, tokenDecimals: decimals, solAmount, tokenAmount, burnLpTokens: burnLp });
+
+  log("PASO 4/4 — Verificación en explorer...");
+  console.log("\n🎉 ¡Listo! Tu memecoin está completo:");
+  console.log(`   Token:    https://explorer.solana.com/address/${mint.toBase58()}?cluster=${CLUSTER}`);
+  console.log(`   Liquidez: ${burnLp ? "🔒 bloqueada (LP quemados)" : "⚠️ desbloqueada"}`);
+  rl.close();
+}
+
+main().catch((err) => {
+  console.error("\n❌ Error:", err);
+  process.exit(1);
+});
