@@ -1,0 +1,76 @@
+import Raydium from "@raydium-io/raydium-sdk-v2";
+import { BN } from "bn.js";
+import { PublicKey, LAMPORTS_PER_SOL } from "@solana/web3.js";
+import { NATIVE_MINT } from "@solana/spl-token";
+import {
+  getAssociatedTokenAddressSync,
+  getAccount,
+  burn,
+} from "@solana/spl-token";
+import { connection, owner, CLUSTER, log } from "./config.js";
+
+export interface PoolParams {
+  tokenMint: PublicKey;
+  tokenDecimals: number;
+  solAmount: number;   // cuántos SOL aportas de liquidez
+  tokenAmount: number; // cuántos tokens aportas (del suministro que acuñaste)
+  burnLpTokens: boolean; // quemar los LP => liquidez bloqueada para siempre (anti rug)
+}
+
+export async function createLiquidityPool(p: PoolParams): Promise<string> {
+  log("Abriendo pool de liquidez en Raydium (CPMM)...");
+  const raydium = await Raydium.load({
+    connection,
+    owner,
+    cluster: CLUSTER === "mainnet-beta" ? "mainnet" : "devnet",
+  });
+
+  const { execute, extInfo, transaction } = await raydium.cpmm.createPool({
+    mintA: NATIVE_MINT.toBase58(),          // WSOL
+    mintB: p.tokenMint.toBase58(),          // tu token
+    mintAAmount: new BN(Math.round(p.solAmount * LAMPORTS_PER_SOL)),
+    mintBAmount: new BN(Math.round(p.tokenAmount * 10 ** p.tokenDecimals)),
+    startTime: new BN(0),                   // abre inmediatamente
+    // txVersion: TxVersion.V0, // descomenta si tu SDK lo requiere
+  } as any);
+
+  const { txId } = await execute({ sendAndConfirm: true });
+  log(`✅ Pool creado. Tx: ${txId}`);
+
+  const poolId = extInfo?.address?.poolId?.toBase58();
+  if (poolId) log(`   Pool ID: ${poolId}`);
+  log(`   Ver en Raydium: https://raydium.io/liquidity/pools`);
+
+  // ── QUEMAR LP TOKENS (anti rug pull) ─────────────────────────────
+  // Al crear el pool recibes LP tokens = tu participación en la liquidez.
+  // Si los quemas (envío a dirección de quemado), NADIE puede retirar
+  // la liquidez jamás, ni siquiera tú.
+  if (p.burnLpTokens && poolId) {
+    const lpMint = new PublicKey(extInfo.address.lpMint.toBase58());
+    const lpAta = getAssociatedTokenAddressSync(lpMint, owner.publicKey);
+
+    const lpAccount = await getAccount(connection, lpAta);
+    const lpBalance = lpAccount.amount;
+
+    if (lpBalance > 0n) {
+      log(`Quemando ${lpBalance.toString()} LP tokens (liquidez bloqueada para siempre)...`);
+      const burnTx = await burn(
+        connection,
+        owner,
+        lpAta,
+        lpMint,
+        owner,
+        lpBalance
+      );
+      log(`✅ LP quemados. Tx: ${burnTx}`);
+      log("   🔒 Liquidez bloqueada: imposible hacer rug pull retirando el pool.");
+    } else {
+      log("No se encontraron LP tokens para quemar (revisa el pool manualmente).");
+    }
+  } else if (!p.burnLpTokens) {
+    log("⚠️ No quemaste los LP. Puedes retirar la liquidez cuando quieras —");
+    log("   la comunidad verá esto como un riesgo de rug pull.");
+  }
+
+  return txId;
+}
